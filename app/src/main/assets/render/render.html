@@ -79,12 +79,22 @@
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
-        /** 模型偶尔直接输出 \begin{aligned}…\end{aligned}，补上 $$ 才能渲染 */
+        /**
+         * 模型偶尔直接输出 \begin{aligned}…\end{aligned}（外层没自己加 $$），补上 $$ 才能渲染。
+         *
+         * 【调用时机很关键】只能在所有 $ 系分隔符都已被 protectMath 换成占位符**之后**调用，
+         * 那时文本里剩下的 \begin{…} 才是真正"裸"的环境，不会误伤已经写好的 $$…$$ / $…$。
+         *
+         * 原实现在 protectMath 开头就额外调了一次，于是已经带 $$ 的环境被再包一层：
+         * `$$\begin{aligned}…\end{aligned}$$` → `$$$$\begin{aligned}…\end{aligned}$$$$`，
+         * KaTeX 把 `$$$$` 解析成两个空公式，aligned 内容被甩出数学模式，整块渲染失败。
+         * 原来的守卫 `match.indexOf('$$') === 0` 也拦不住——正则匹配到的只有 \begin…\end 本身，
+         * 外层的 $$ 并不在 match 里，所以这个判断恒为假。
+         */
         function wrapBareEnvironments(text) {
             return String(text).replace(
                 /\\begin\{(equation\*?|align\*?|aligned|gather\*?|array|cases|pmatrix|bmatrix|vmatrix|Vmatrix|matrix|split)\}([\s\S]*?)\\end\{\1\}/g,
-                function (match, env) {
-                    if (match.indexOf('$$') === 0) return match;
+                function (match) {
                     return '$$' + match + '$$';
                 }
             );
@@ -106,7 +116,9 @@
                 store.push(raw);
                 return PLACEHOLDER_PREFIX + (store.length - 1) + PLACEHOLDER_SUFFIX;
             }
-            var out = wrapBareEnvironments(text);
+            // 注意：这里**不要**提前调 wrapBareEnvironments。
+            // 此时 $$ / $ 分隔符还在，已经写好的公式会被重复包裹（见该函数注释）。裸环境统一留到第 5 步处理。
+            var out = String(text);
             // 1) 独立公式 $$ ... $$
             out = out.replace(/\$\$([\s\S]*?)\$\$/g, stash);
             // 2) \[ ... \] → $$ ... $$
@@ -126,13 +138,24 @@
             return {text: out, store: store};
         }
 
+        /**
+         * 把还原的公式转义成 HTML 安全文本再放回文档。
+         *
+         * 【为什么必须转义】restoreMath 的结果随后会经 `CONTENT.innerHTML = html` 注入，
+         * 而此时公式仍是裸文本，里面的 `<` `>` 会被浏览器当成 HTML 标签：
+         * `当 $0<k<n$ 时成立` 会被解析成一个未闭合的开标签，一路吞到下一个 `>`，
+         * 于是公式连同后面的整段正文一起消失——而且是静默的，用户看不到任何报错。
+         *
+         * 转义后 innerHTML 解析出来的 textContent 仍等于原始公式文本，KaTeX 拿到的内容完全正确，
+         * 因此无论模型输出什么都不会再坏。escapeHtml 内部保证 `&` 先于 `<` `>` 处理，不会二次转义。
+         */
         function restoreMath(html, store) {
             if (!store.length) return html;
             return html.replace(
                 new RegExp(PLACEHOLDER_PREFIX + '(\\d+)' + PLACEHOLDER_SUFFIX, 'g'),
                 function (m, index) {
                     var raw = store[parseInt(index, 10)];
-                    return (raw === undefined) ? m : raw;
+                    return (raw === undefined) ? m : escapeHtml(raw);
                 }
             );
         }
