@@ -30,6 +30,38 @@ object DeepSeekClient {
     /** 小节对话最多带上多少轮历史（避免上下文过长） */
     private const val MAX_CHAT_HISTORY = 12
 
+    /**
+     * 【LaTeX 安全铁律】凡是要求模型产出 LaTeX 的提示词，都必须带上这一段。
+     *
+     * 为什么必须加：`assets/render/render.html` 的渲染流程是
+     * `protectMath()` → marked 解析 Markdown → `restoreMath()` → `CONTENT.innerHTML = html`。
+     * `protectMath()` 只保护了反斜杠序列不被 Markdown 吃掉，而公式在「还原」时是作为
+     * **裸文本**塞进 `innerHTML` 的，于是公式里的 `<` `>` 会被浏览器当成 HTML 标签解析：
+     * 轻则公式错乱（如 `$a<b>c$` 里的 `<b>` 变成加粗标签），重则解析器一直吞到下一个 `>`，
+     * 把公式连同后面的整段内容一起吃掉。
+     *
+     * 根治办法是在 `render.html` 里对还原的公式做 HTML 转义，但模型侧的提示词约束同样必要
+     * ——它还能顺带规避 LaTeX 自身的转义陷阱（`%` 注释、多字符上下标等）。
+     */
+    const val LATEX_SAFETY_RULE =
+        "【LaTeX 安全铁律（必须遵守，违反会导致公式显示失败）】\n" +
+            "1) 公式里**绝对不要出现裸的 `<` 和 `>`**（`<=`、`>=`、`=<`、`=>` 同样禁止）——" +
+            "它们会被当成 HTML 标签，轻则公式错乱，重则公式连同后面内容一起消失。" +
+            "小于、大于必须写成 `\\lt`、`\\gt`，例如 \$a \\lt b\$、\$x \\gt 0\$、\$0 \\lt x \\lt 1\$；\n" +
+            "2) 不等号同理：小于等于 `\\le`、大于等于 `\\ge`、不等于 `\\ne`（不要写 ≤ ≥ ≠）；\n" +
+            "3) 运算符号用命令：`\\times` `\\div` `\\pm` `\\cdot` `\\ast`（不要写 × ÷ ± · ＊）；\n" +
+            "4) 希腊字母用 `\\alpha` `\\beta` `\\gamma` `\\theta` `\\pi` `\\lambda` `\\mu` `\\sigma` `\\omega`" +
+            "（不要直接打 α β γ θ π λ μ σ ω）；\n" +
+            "5) 集合与关系符号：`\\in` `\\notin` `\\subset` `\\subseteq` `\\cup` `\\cap` `\\varnothing` " +
+            "`\\approx` `\\equiv` `\\propto`（不要用 ∈ ∉ ⊂ ∪ ∩ ∅ ≈ ≡ ∝）；\n" +
+            "6) 箭头 / 无穷 / 根号 / 求和 / 积分 / 极限：`\\to` `\\Rightarrow` `\\Leftrightarrow` `\\infty` " +
+            "`\\sqrt{}` `\\sum` `\\prod` `\\int` `\\lim`（不要写 → ⇒ ⇔ ∞ √ ∑ ∏ ∫）；\n" +
+            "7) 上标下标多字符必须加花括号：\$x^{10}\$、\$a_{ij}\$、\$x^{-1}\$（不要写 \$x^10\$、\$a_ij\$）；\n" +
+            "8) 百分号必须转义成 `\\%`（如 \$50\\%\$），否则 LaTeX 会把后面的内容当注释吃掉；" +
+            "普通文本里的 `_` `#` `&` 也写成 `\\_` `\\#` `\\&`；\n" +
+            "9) 公式里的中文或说明文字用 `\\text{...}` 包起来，例如 \$\\text{速度} = 3\\ \\text{m/s}\$；" +
+            "`&` 只在 `\\begin{aligned}` / `\\begin{cases}` / `\\begin{pmatrix}` 里当对齐符用，其余场合不要写。"
+
     /** token 用量 */
     data class Usage(
         val promptTokens: Int,
@@ -171,7 +203,8 @@ object DeepSeekClient {
             append("并给出**可以直接补充进资料的完整内容**（方便他复制粘贴）；\n")
             append("4) 需要时举例说明；\n")
             append("5) 所有数学公式用 LaTeX（行内 \$...\$，独立公式 \$\$...\$\$）；\n")
-            append("6) 中文回答，条理清晰，不要说客套话。")
+            append("6) 中文回答，条理清晰，不要说客套话。\n\n")
+            append(LATEX_SAFETY_RULE)
         }
         return ask(apiKey, model, prompt)
     }
@@ -310,7 +343,8 @@ object DeepSeekClient {
             // 统一追加排版要求：App 端用 KaTeX 渲染公式，必须是标准 LaTeX
             if (isNotEmpty()) append("\n\n")
             append("【排版要求】用 Markdown 组织；所有数学公式用 LaTeX（行内 $...$，独立公式 $$...$$），")
-            append("不要用 Unicode 拼公式；步骤分行写清楚。")
+            append("不要用 Unicode 拼公式；步骤分行写清楚。\n\n")
+            append(LATEX_SAFETY_RULE)
         }
 
         val result = if (images.isEmpty()) {
@@ -372,17 +406,23 @@ object DeepSeekClient {
                 append(" 张目录页照片，请识别其中所有章节目录，合并整理（可能有跨页内容）。\n")
             }
             append("\n要求：\n")
-            append("1) 尽量完整覆盖全书，一级为大章（如「第一章 绪论」），二级为小章（如「1.1 研究背景」）；\n")
-            if (grounded) {
-                append("2) **只使用上面 PDF 原文中真实出现的章节标题与编号**；原文没有的内容一律不要添加；\n")
-                append("3) 如果原文片段只覆盖了部分章节，就只输出覆盖到的部分，不要用「常识」补全；\n")
-                append("4) 如果错题本里的易错点正好落在某个小节，请在该小节标题后追加「（易错·重点）」；\n")
-            } else {
-                append("2) 若信息不足，按该学科通用教材结构合理推断，但不要编造与书名明显无关的内容；\n")
-                append("3) 如果错题本里的易错点正好落在某个小节，请在该小节标题后追加「（易错·重点）」；\n")
+            // 编号交给计数器生成：原来 grounded / 非 grounded 两个分支各写一套编号，
+            // 结果无 PDF 分支写成 1) 2) 3) 5) 6)，漏了 4)。用计数器就不会再跳号。
+            var ruleNo = 0
+            fun rule(text: String) {
+                ruleNo++
+                append(ruleNo).append(") ").append(text).append("\n")
             }
-            append("5) 语言风格：").append(style.prompt).append("\n")
-            append("6) 只输出 JSON，不要任何解释文字。\n")
+            rule("尽量完整覆盖全书，一级为大章（如「第一章 绪论」），二级为小章（如「1.1 研究背景」）；")
+            if (grounded) {
+                rule("**只使用上面 PDF 原文中真实出现的章节标题与编号**；原文没有的内容一律不要添加；")
+                rule("如果原文片段只覆盖了部分章节，就只输出覆盖到的部分，不要用「常识」补全；")
+            } else {
+                rule("若信息不足，按该学科通用教材结构合理推断，但不要编造与书名明显无关的内容；")
+            }
+            rule("如果错题本里的易错点正好落在某个小节，请在该小节标题后追加「（易错·重点）」；")
+            rule("语言风格：" + style.prompt)
+            rule("只输出 JSON，不要任何解释文字。")
             append("JSON 格式：{\"chapters\":[{\"title\":\"第一章 绪论\",\"sections\":[\"1.1 xxx\",\"1.2 xxx\"]}]}")
         }
 
@@ -478,6 +518,7 @@ object DeepSeekClient {
             append("  · title：题目标题，如「例题 1 求极限」；\n")
             append("  · question：题干（只写题目，不要写解答）；\n")
             append("  · solution：分步解答。\n\n")
+            append(LATEX_SAFETY_RULE).append("\n\n")
             append("只输出 JSON，不要任何解释文字。\n")
             append(
                 "JSON 格式：{\"knowledge\":\"...\",\"formulas\":\"...\"," +

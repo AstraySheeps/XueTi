@@ -200,6 +200,7 @@ class MistakeActivity : BaseActivity() {
             append("2) 完整、分步的正确解法；\n")
             append("3) 一句话总结这类题的通用方法或易错点。\n")
             append("要求：所有数学公式用 LaTeX 表示（行内 $...$，独立公式 $$...$$），不要用 Unicode 拼公式。\n\n")
+            append(DeepSeekClient.LATEX_SAFETY_RULE).append("\n\n")
             append("【题目】\n").append(item.question).append("\n")
             if (item.aiAnswer.isNotBlank()) {
                 append("\n【之前的解答（可能有错，仅供参考）】\n").append(item.aiAnswer).append("\n")
